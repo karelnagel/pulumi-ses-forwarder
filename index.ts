@@ -1,3 +1,7 @@
+import * as aws from "@pulumi/aws";
+import * as pulumi from "@pulumi/pulumi";
+
+const FORWARDER_JS = `
 "use strict";
 
 var AWS = require('aws-sdk');
@@ -330,3 +334,203 @@ Promise.series = function (promises, initValue) {
         return chain.then(promise);
     }, Promise.resolve(initValue));
 };
+
+`;
+const getIndexJS = ({
+  fromEmail,
+  bucketName,
+  forwardMapping,
+}: {
+  fromEmail: string;
+  bucketName: string;
+  forwardMapping: Record<string, string[]>;
+}) => `
+  var LambdaForwarder = require("./forwarder");
+  
+  exports.handler = function (event, context, callback) {
+      var config = {
+          fromEmail: "${fromEmail}",
+          subjectPrefix: "",
+          emailBucket: "${bucketName}",
+          emailKeyPrefix: "emails/",
+          allowPlusSign: true,
+          forwardMapping: ${JSON.stringify(forwardMapping)}
+      };
+      LambdaForwarder.handler(event, context, callback, { config });
+  };
+  `;
+
+type EmailForwarderConfig = {
+  fromEmail: string;
+  recipients: string[];
+  forwardMapping: Record<string, string[]>;
+};
+
+export class EmailForwarder extends pulumi.ComponentResource {
+  public bucket: aws.s3.Bucket;
+  public function: aws.lambda.Function;
+
+  constructor(name: string, args: EmailForwarderConfig, opts?: pulumi.ComponentResourceOptions) {
+    // By calling super(), we ensure any instantiation of this class
+    // inherits from the ComponentResource class so we don't have to
+    // declare all the same things all over again.
+    super("pkg:index:EmailForwarder", name, args, opts);
+
+    this.bucket = new aws.s3.Bucket(name + "Storage", { forceDestroy: true, versioning: { enabled: true } }, { parent: this });
+
+    const lambdaRole = new aws.iam.Role(
+      name + "LambdaSesForwarder",
+      {
+        assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "lambda.amazonaws.com" }),
+      },
+      { parent: this }
+    );
+    const lambdaCustomPolicy = new aws.iam.Policy(
+      name + "LambdaSesForwarderPolicy",
+      {
+        policy: JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+              Resource: "arn:aws:logs:*:*:*",
+            },
+            {
+              Effect: "Allow",
+              Action: "ses:SendRawEmail",
+              Resource: "*",
+            },
+            {
+              Effect: "Allow",
+              Action: ["s3:GetObject", "s3:PutObject"],
+              // Todo allow access to only the one bucket
+              Resource: "*",
+            },
+          ],
+        }),
+      },
+      { parent: this }
+    );
+    new aws.iam.RolePolicyAttachment(
+      name + "LambdaSesForwarderPolicyAttachment",
+      {
+        role: lambdaRole,
+        policyArn: lambdaCustomPolicy.arn,
+      },
+      { parent: this }
+    );
+    new aws.iam.RolePolicyAttachment(
+      name + "LambdaBasicExecutionRoleAttachment",
+      {
+        role: lambdaRole,
+        policyArn: aws.iam.ManagedPolicy.AWSLambdaBasicExecutionRole,
+      },
+      { parent: this }
+    );
+
+    this.function = new aws.lambda.Function(
+      name + "SesForwarderLambda",
+      {
+        runtime: "nodejs16.x",
+        code: new pulumi.asset.AssetArchive({
+          // Todo correct path
+          "index.js": this.bucket.bucket.apply(
+            (bucketName) =>
+              new pulumi.asset.StringAsset(
+                getIndexJS({
+                  bucketName,
+                  fromEmail: args.fromEmail,
+                  forwardMapping: args.forwardMapping,
+                })
+              )
+          ),
+          "forwarder.js": new pulumi.asset.StringAsset(FORWARDER_JS),
+        }),
+        timeout: 10,
+        handler: "index.handler",
+        role: lambdaRole.arn,
+        environment: { variables: {} },
+      },
+      { parent: this }
+    );
+
+    new aws.lambda.Permission(
+      name + "SESLambdaInvokePermission",
+      {
+        action: "lambda:InvokeFunction",
+        function: this.function.name,
+        principal: "ses.amazonaws.com",
+        sourceAccount: pulumi.output(aws.getCallerIdentity({})).apply((id) => id.accountId),
+      },
+      { parent: this }
+    );
+
+    const ruleSet = new aws.ses.ReceiptRuleSet(name + "MainRuleSet", { ruleSetName: "main" }, { parent: this });
+
+    new aws.ses.ReceiptRule(
+      name + "Rule",
+      {
+        ruleSetName: ruleSet.ruleSetName,
+        enabled: true,
+        recipients: args.recipients,
+        s3Actions: [
+          {
+            position: 1,
+            bucketName: this.bucket.bucket,
+            objectKeyPrefix: "emails/",
+          },
+        ],
+        lambdaActions: [
+          {
+            position: 2,
+            functionArn: this.function.arn,
+          },
+        ],
+      },
+      { parent: this }
+    );
+    new aws.ses.ActiveReceiptRuleSet(
+      name + "ActiveMainRuleSet",
+      {
+        ruleSetName: ruleSet.ruleSetName,
+      },
+      { parent: this }
+    );
+
+    aws.getCallerIdentity({}).then(({ accountId }) => {
+      new aws.s3.BucketPolicy(
+        name + "BucketPolicy",
+        {
+          bucket: this.bucket.bucket,
+          policy: this.bucket.bucket.apply((bucketName) =>
+            JSON.stringify({
+              Version: "2012-10-17",
+              Statement: [
+                {
+                  Effect: "Allow",
+                  Principal: {
+                    Service: "ses.amazonaws.com",
+                  },
+                  Action: "s3:PutObject",
+                  Resource: `arn:aws:s3:::${bucketName}/*`,
+                  Condition: {
+                    StringEquals: {
+                      "aws:Referer": accountId,
+                    },
+                  },
+                },
+              ],
+            })
+          ),
+        },
+        { parent: this }
+      );
+
+      this.registerOutputs({
+        bucketName: this.bucket.id,
+        functionName: this.function.name,
+      });
+    });
+  }
+}

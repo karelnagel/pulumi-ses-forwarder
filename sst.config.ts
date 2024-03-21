@@ -9,45 +9,62 @@ export default $config({
       removal: input?.stage === "production" ? "retain" : "remove",
       home: "aws",
       providers: {
-        aws: {
-          region: "eu-central-1",
-        },
+        aws: { region: "eu-central-1" },
       },
     };
   },
   run: async () => {
-    // LAMBDA
-    const lambdaRole = new aws.iam.Role("LambdaRole", {
-      assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "lambda.amazonaws.com" }),
+    const emailStorageBucket = new aws.s3.Bucket("EmailStorage", {
+      versioning: {
+        enabled: true,
+      },
     });
 
-    // Attach the AWSLambdaBasicExecutionRole policy to the IAM role
-    new aws.iam.RolePolicyAttachment("LambdaPolicyAttachment", {
+    const lambdaRole = new aws.iam.Role("LambdaSesForwarder", {
+      assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "lambda.amazonaws.com" }),
+    });
+    const lambdaCustomPolicy = new aws.iam.Policy("LambdaSesForwarderPolicy", {
+      policy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            Resource: "arn:aws:logs:*:*:*",
+          },
+          {
+            Effect: "Allow",
+            Action: "ses:SendRawEmail",
+            Resource: "*",
+          },
+          {
+            Effect: "Allow",
+            Action: ["s3:GetObject", "s3:PutObject"],
+            Resource: "*",
+          },
+        ],
+      }),
+    });
+    new aws.iam.RolePolicyAttachment("LambdaSesForwarderPolicyAttachment", {
+      role: lambdaRole,
+      policyArn: lambdaCustomPolicy.arn,
+    });
+    new aws.iam.RolePolicyAttachment("LambdaBasicExecutionRoleAttachment", {
       role: lambdaRole,
       policyArn: aws.iam.ManagedPolicy.AWSLambdaBasicExecutionRole,
     });
 
-    // Define the Lambda function
-    const emailProcessorLambda = new aws.lambda.Function("EmailProcessorLambda", {
-      runtime: "nodejs18.x",
+    const emailProcessorLambda = new aws.lambda.Function("SesForwarderLambda", {
+      runtime: "nodejs16.x",
       code: new pulumi.asset.AssetArchive({
-        "index.js": new pulumi.asset.StringAsset(
-          "/* global fetch */" +
-          "exports.handler = async (event) => {" +
-            '   console.log("Processing event: ", event);' +
-            '   await fetch("https://asius.ai/api/emails",{method:"POST",body:JSON.stringify(event)}).then(res=>res.status);' +
-            "};"
-        ),
+        "index.js": new pulumi.asset.FileAsset("/Users/karel/Documents/sst-email-forwarder/index.js"),
       }),
       timeout: 10,
       handler: "index.handler",
       role: lambdaRole.arn,
-      environment: {
-        variables: {},
-      },
+      environment: { variables: {} },
     });
 
-    // Add permission for SES to invoke the Lambda function
     new aws.lambda.Permission("SESLambdaInvokePermission", {
       action: "lambda:InvokeFunction",
       function: emailProcessorLambda.name,
@@ -55,38 +72,55 @@ export default $config({
       sourceAccount: pulumi.output(aws.getCallerIdentity({})).apply((id) => id.accountId),
     });
 
-    // EMAIL
-    const ruleSet = new aws.ses.ReceiptRuleSet("Main", { ruleSetName: "main" });
-    const bounceRule = new aws.ses.ReceiptRule("BounceRule", {
+    const ruleSet = new aws.ses.ReceiptRuleSet("MainRuleSet", { ruleSetName: "main" });
+
+    new aws.ses.ReceiptRule("EmailForwardingRule", {
       ruleSetName: ruleSet.ruleSetName,
-      recipients: ["no-reply@asius.ai"],
-      bounceActions: [
+      enabled: true,
+      recipients: ["asius.ee"],
+      s3Actions: [
         {
           position: 1,
-          message: "Rejected because the sender is not no-reply@asius.ai",
-          sender: "no-reply@asius.ai",
-          smtpReplyCode: "550",
-          statusCode: "5.7.1",
+          bucketName: emailStorageBucket.bucket,
+          objectKeyPrefix: "emails/",
         },
       ],
-      enabled: true,
-    });
-
-    const forwardRule = new aws.ses.ReceiptRule("FrowardRule", {
-      ruleSetName: ruleSet.ruleSetName,
-      enabled: true,
-      recipients: ["uploads@asius.ai"],
-      scanEnabled: true,
       lambdaActions: [
         {
-          position: 1,
+          position: 2,
           functionArn: emailProcessorLambda.arn,
         },
       ],
     });
-    new aws.ses.ActiveReceiptRuleSet("ActiveRuleSet", {
+    new aws.ses.ActiveReceiptRuleSet("ActiveMainRuleSet", {
       ruleSetName: ruleSet.ruleSetName,
     });
-    
+
+    const accountId = await aws.getCallerIdentity({}).then((c) => c.accountId);
+    console.log({ accountId });
+
+    new aws.s3.BucketPolicy("EmailStorageBucketPolicy", {
+      bucket: emailStorageBucket.bucket,
+      policy: emailStorageBucket.bucket.apply((bucketName) =>
+        JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: {
+                Service: "ses.amazonaws.com",
+              },
+              Action: "s3:PutObject",
+              Resource: `arn:aws:s3:::${bucketName}/*`,
+              Condition: {
+                StringEquals: {
+                  "aws:Referer": accountId,
+                },
+              },
+            },
+          ],
+        })
+      ),
+    });
   },
 });

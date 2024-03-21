@@ -5,7 +5,7 @@ import { EmailForwarder } from ".";
 export default $config({
   app: (input) => {
     return {
-      name: "sst-email-forwarder",
+      name: "pulumi-email-forwarder",
       removal: input?.stage === "production" ? "retain" : "remove",
       home: "aws",
       providers: {
@@ -15,11 +15,12 @@ export default $config({
   },
   run: async () => {
     new EmailForwarder("EmailForwarder", {
-      recipients: ["asius.ee"],
-      fromEmail: "noreply@asius.ee",
+      recipients: ["example.com"],
+      hostedZone: "example.com",
+      fromEmail: "noreply@example.com",
       forwardMapping: {
-        "info@asius.ee": ["ouasius@gmail.com", "nagelkarel@gmail.com"],
-        "@asius.ee": ["nagelkarel@gmail.com"],
+        "info@example.com": ["john@example.com", "jane@gmail.com"],
+        "@example.com": ["john@example.com"],
       },
     });
   },

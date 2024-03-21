@@ -48,7 +48,7 @@ exports.transformRecipients = function (data) {
     data.recipients.forEach(function (origEmail) {
         var origEmailKey = origEmail.toLowerCase();
         if (data.config.allowPlusSign) {
-            origEmailKey = origEmailKey.replace(/\+.*?@/, '@');
+            origEmailKey = origEmailKey.replace(/\\+.*?@/, '@');
         }
         if (data.config.forwardMapping.hasOwnProperty(origEmailKey)) {
             newRecipients = newRecipients.concat(
@@ -161,13 +161,13 @@ exports.fetchMessage = function (data) {
  * @return {object} - Promise resolved with data.
  */
 exports.processMessage = function (data) {
-    var match = data.emailData.match(/^((?:.+\r?\n)*)(\r?\n(?:.*\s+)*)/m);
+    var match = data.emailData.match(/^((?:.+\\r?\\n)*)(\\r?\\n(?:.*\\s+)*)/m);
     var header = match && match[1] ? match[1] : data.emailData;
     var body = match && match[2] ? match[2] : '';
 
     // Add "Reply-To:" with the "From" address if it doesn't already exists
-    if (!/^reply-to:[\t ]?/mi.test(header)) {
-        match = header.match(/^from:[\t ]?(.*(?:\r?\n\s+.*)*\r?\n)/mi);
+    if (!/^reply-to:[\\t ]?/mi.test(header)) {
+        match = header.match(/^from:[\\t ]?(.*(?:\\r?\\n\\s+.*)*\\r?\\n)/mi);
         var from = match && match[1] ? match[1] : '';
         if (from) {
             header = header + 'Reply-To: ' + from;
@@ -188,7 +188,7 @@ exports.processMessage = function (data) {
     // so replace the message's "From:" header with the original
     // recipient (which is a verified domain)
     header = header.replace(
-        /^from:[\t ]?(.*(?:\r?\n\s+.*)*)/mgi,
+        /^from:[\\t ]?(.*(?:\\r?\\n\\s+.*)*)/mgi,
         function (match, from) {
             var fromText;
             if (data.config.fromEmail) {
@@ -204,7 +204,7 @@ exports.processMessage = function (data) {
     // Add a prefix to the Subject
     if (data.config.subjectPrefix) {
         header = header.replace(
-            /^subject:[\t ]?(.*)/mgi,
+            /^subject:[\\t ]?(.*)/mgi,
             function (match, subject) {
                 return 'Subject: ' + data.config.subjectPrefix + subject;
             });
@@ -212,23 +212,23 @@ exports.processMessage = function (data) {
 
     // Replace original 'To' header with a manually defined one
     if (data.config.toEmail) {
-        header = header.replace(/^to:[\t ]?(.*)/mgi, 'To: ' + data.config.toEmail);
+        header = header.replace(/^to:[\\t ]?(.*)/mgi, 'To: ' + data.config.toEmail);
     }
 
     // Remove the Return-Path header.
-    header = header.replace(/^return-path:[\t ]?(.*)\r?\n/mgi, '');
+    header = header.replace(/^return-path:[\\t ]?(.*)\\r?\\n/mgi, '');
 
     // Remove Sender header.
-    header = header.replace(/^sender:[\t ]?(.*)\r?\n/mgi, '');
+    header = header.replace(/^sender:[\\t ]?(.*)\\r?\\n/mgi, '');
 
     // Remove Message-ID header.
-    header = header.replace(/^message-id:[\t ]?(.*)\r?\n/mgi, '');
+    header = header.replace(/^message-id:[\\t ]?(.*)\\r?\\n/mgi, '');
 
     // Remove all DKIM-Signature headers to prevent triggering an
     // "InvalidParameterValue: Duplicate header 'DKIM-Signature'" error.
     // These signatures will likely be invalid anyways, since the From
     // header was modified.
-    header = header.replace(/^dkim-signature:[\t ]?.*\r?\n(\s+.*\r?\n)*/mgi, '');
+    header = header.replace(/^dkim-signature:[\\t ]?.*\\r?\\n(\\s+.*\\r?\\n)*/mgi, '');
 
     data.emailData = header + body;
     return Promise.resolve(data);
@@ -364,6 +364,7 @@ type EmailForwarderConfig = {
   fromEmail: string;
   recipients: string[];
   forwardMapping: Record<string, string[]>;
+  hostedZone?: string;
 };
 
 export class EmailForwarder extends pulumi.ComponentResource {
@@ -371,10 +372,23 @@ export class EmailForwarder extends pulumi.ComponentResource {
   public function: aws.lambda.Function;
 
   constructor(name: string, args: EmailForwarderConfig, opts?: pulumi.ComponentResourceOptions) {
-    // By calling super(), we ensure any instantiation of this class
-    // inherits from the ComponentResource class so we don't have to
-    // declare all the same things all over again.
     super("pkg:index:EmailForwarder", name, args, opts);
+
+    if (args.hostedZone) {
+      const zoneId = aws.route53.getZone({ name: args.hostedZone });
+      const region = aws.getRegion({});
+      new aws.route53.Record(
+        name + "MX",
+        {
+          zoneId: zoneId.then((z) => z.zoneId),
+          name: args.hostedZone,
+          type: "MX",
+          ttl: 300,
+          records: region.then((region) => [`10 inbound-smtp.${region.id}.amazonaws.com`]),
+        },
+        { parent: this }
+      );
+    }
 
     this.bucket = new aws.s3.Bucket(name + "Storage", { forceDestroy: true, versioning: { enabled: true } }, { parent: this });
 
@@ -388,27 +402,28 @@ export class EmailForwarder extends pulumi.ComponentResource {
     const lambdaCustomPolicy = new aws.iam.Policy(
       name + "LambdaSesForwarderPolicy",
       {
-        policy: JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Allow",
-              Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-              Resource: "arn:aws:logs:*:*:*",
-            },
-            {
-              Effect: "Allow",
-              Action: "ses:SendRawEmail",
-              Resource: "*",
-            },
-            {
-              Effect: "Allow",
-              Action: ["s3:GetObject", "s3:PutObject"],
-              // Todo allow access to only the one bucket
-              Resource: "*",
-            },
-          ],
-        }),
+        policy: this.bucket.bucket.apply((bucketName) =>
+          JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [
+              {
+                Effect: "Allow",
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+                Resource: "arn:aws:logs:*:*:*",
+              },
+              {
+                Effect: "Allow",
+                Action: "ses:SendRawEmail",
+                Resource: "*",
+              },
+              {
+                Effect: "Allow",
+                Action: ["s3:GetObject", "s3:PutObject"],
+                Resource: `arn:aws:s3:::${bucketName}/*`,
+              },
+            ],
+          })
+        ),
       },
       { parent: this }
     );
@@ -434,7 +449,6 @@ export class EmailForwarder extends pulumi.ComponentResource {
       {
         runtime: "nodejs16.x",
         code: new pulumi.asset.AssetArchive({
-          // Todo correct path
           "index.js": this.bucket.bucket.apply(
             (bucketName) =>
               new pulumi.asset.StringAsset(

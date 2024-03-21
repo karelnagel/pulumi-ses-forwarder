@@ -35,22 +35,6 @@ console.log("AWS Lambda SES Forwarder // @arithmetric // Version 5.1.0");
 //   and domain part of an email address (i.e. `info`).
 //
 //   To match all email addresses matching no other mapping, use "@" as a key.
-var defaultConfig = {
-    fromEmail: "noreply@asius.ee",
-    subjectPrefix: "",
-    emailBucket: "emailstorage-2c680a1",
-    emailKeyPrefix: "emails/",
-    allowPlusSign: true,
-    forwardMapping: {
-        "info@asius.ee": [
-            "ouasius@gmail.com",
-            "nagelkarel@gmail.com",
-        ],
-        "@asius.ee": [
-            "nagelkarel@gmail.com"
-        ],
-    }
-};
 
 /**
  * Parses the SES event record provided for the `mail` and `receipients` data.
@@ -343,7 +327,7 @@ exports.handler = function (event, context, callback, overrides) {
         event: event,
         callback: callback,
         context: context,
-        config: overrides && overrides.config ? overrides.config : defaultConfig,
+        config: overrides.config,
         log: overrides && overrides.log ? overrides.log : console.log,
         ses: overrides && overrides.ses ? overrides.ses : new AWS.SES(),
         s3: overrides && overrides.s3 ?

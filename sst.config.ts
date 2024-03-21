@@ -16,7 +16,7 @@ export default $config({
   run: async () => {
     new EmailForwarder("EmailForwarder", {
       recipients: ["example.com"],
-      hostedZone: "example.com",
+      hostedZones: ["example.com"],
       fromEmail: "noreply@example.com",
       forwardMapping: {
         "info@example.com": ["john@example.com", "jane@gmail.com"],

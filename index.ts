@@ -364,7 +364,7 @@ type EmailForwarderConfig = {
   fromEmail: string;
   recipients: string[];
   forwardMapping: Record<string, string[]>;
-  hostedZone?: string;
+  hostedZones?: string[];
 };
 
 export class EmailForwarder extends pulumi.ComponentResource {
@@ -374,20 +374,22 @@ export class EmailForwarder extends pulumi.ComponentResource {
   constructor(name: string, args: EmailForwarderConfig, opts?: pulumi.ComponentResourceOptions) {
     super("pkg:index:EmailForwarder", name, args, opts);
 
-    if (args.hostedZone) {
-      const zoneId = aws.route53.getZone({ name: args.hostedZone });
-      const region = aws.getRegion({});
-      new aws.route53.Record(
-        name + "MX",
-        {
-          zoneId: zoneId.then((z) => z.zoneId),
-          name: args.hostedZone,
-          type: "MX",
-          ttl: 300,
-          records: region.then((region) => [`10 inbound-smtp.${region.id}.amazonaws.com`]),
-        },
-        { parent: this }
-      );
+    if (args.hostedZones?.length) {
+      for (const [i, zone] of args.hostedZones.entries()) {
+        const zoneId = aws.route53.getZone({ name: zone });
+        const region = aws.getRegion({});
+        new aws.route53.Record(
+          name + "MX" + i,
+          {
+            zoneId: zoneId.then((z) => z.zoneId),
+            name: zone,
+            type: "MX",
+            ttl: 300,
+            records: region.then((region) => [`10 inbound-smtp.${region.id}.amazonaws.com`]),
+          },
+          { parent: this }
+        );
+      }
     }
 
     this.bucket = new aws.s3.Bucket(name + "Storage", { forceDestroy: true, versioning: { enabled: true } }, { parent: this });

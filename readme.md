@@ -8,6 +8,7 @@ the forwarder.js script is taken from here: https://github.com/arithmetric/aws-l
 
 First time using Pulumi, so PRs are welcome!
 
+Note: at first deploy it throws an error, idk why, but after a retry it works fine.
 
 ## Example
 
@@ -20,7 +21,7 @@ This will:
 ```ts
  new EmailForwarder("EmailForwarder", {
       recipients: ["example.com"],
-      hostedZone: "example.com",
+      hostedZones: ["example.com"],
       fromEmail: "noreply@example.com",
       forwardMapping: {
         "info@example.com": ["john@example.com", "jane@gmail.com"],

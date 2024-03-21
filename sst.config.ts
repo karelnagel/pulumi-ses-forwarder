@@ -32,10 +32,10 @@ export default $config({
       runtime: "nodejs18.x",
       code: new pulumi.asset.AssetArchive({
         "index.js": new pulumi.asset.StringAsset(
+          "/* global fetch */" +
           "exports.handler = async (event) => {" +
             '   console.log("Processing event: ", event);' +
-            "   // Add your email processing and filtering logic here" +
-            "   // Forward the processed content to an HTTP webhook endpoint" +
+            '   await fetch("https://asius.ai/api/emails",{method:"POST",body:JSON.stringify(event)}).then(res=>res.status);' +
             "};"
         ),
       }),
@@ -47,16 +47,24 @@ export default $config({
       },
     });
 
+    // Add permission for SES to invoke the Lambda function
+    new aws.lambda.Permission("SESLambdaInvokePermission", {
+      action: "lambda:InvokeFunction",
+      function: emailProcessorLambda.name,
+      principal: "ses.amazonaws.com",
+      sourceAccount: pulumi.output(aws.getCallerIdentity({})).apply((id) => id.accountId),
+    });
+
     // EMAIL
     const ruleSet = new aws.ses.ReceiptRuleSet("Main", { ruleSetName: "main" });
     const bounceRule = new aws.ses.ReceiptRule("BounceRule", {
       ruleSetName: ruleSet.ruleSetName,
-      recipients: ["no-reply@asius.ee"],
+      recipients: ["no-reply@asius.ai"],
       bounceActions: [
         {
           position: 1,
-          message: "Rejected because the sender is not no-reply@asius.ee",
-          sender: "no-reply@asius.ee",
+          message: "Rejected because the sender is not no-reply@asius.ai",
+          sender: "no-reply@asius.ai",
           smtpReplyCode: "550",
           statusCode: "5.7.1",
         },
@@ -67,7 +75,7 @@ export default $config({
     const forwardRule = new aws.ses.ReceiptRule("FrowardRule", {
       ruleSetName: ruleSet.ruleSetName,
       enabled: true,
-      recipients: ["uploads@asius.ee"],
+      recipients: ["uploads@asius.ai"],
       scanEnabled: true,
       lambdaActions: [
         {
@@ -76,5 +84,9 @@ export default $config({
         },
       ],
     });
+    new aws.ses.ActiveReceiptRuleSet("ActiveRuleSet", {
+      ruleSetName: ruleSet.ruleSetName,
+    });
+    
   },
 });
